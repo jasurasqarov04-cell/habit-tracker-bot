@@ -59,6 +59,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ /done `название` — отметить привычку выполненной\n"
         "❌ /skip `название` — отметить пропуск\n"
         "📊 /stats — статистика за последние 7 дней\n"
+        "🆚 /compare — эта неделя vs прошлая\n"
         "📅 /today — что нужно сделать сегодня\n"
         "➕ /add `название` — добавить новую привычку\n"
         "📋 /list — список всех привычек\n"
@@ -226,6 +227,66 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def compare(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
+    user_id = str(update.effective_user.id)
+    data = sheets.get_weekly_comparison(user_id)
+
+    if not data:
+        await update.message.reply_text("📊 Пока нет данных. Начни отмечать привычки!")
+        return
+
+    lines = ["📊 *Эта неделя vs прошлая:*\n"]
+
+    total_this = 0
+    total_last = 0
+    total_possible = 0
+
+    for habit, info in data.items():
+        this = info["this_week"]
+        last = info["last_week"]
+        total = info["total"]
+        total_this += this
+        total_last += last
+        total_possible += total
+
+        this_pct = int(this / total * 100)
+        last_pct = int(last / total * 100)
+        diff = this_pct - last_pct
+
+        if diff > 0:
+            trend = f"📈 Лучше на {diff}%!"
+        elif diff < 0:
+            trend = f"📉 Хуже на {abs(diff)}%"
+        else:
+            trend = "➡️ Без изменений"
+
+        lines.append(f"*{habit}*")
+        lines.append(f"Эта неделя:     {_progress_bar(this_pct)} {this}/{total} ({this_pct}%)")
+        lines.append(f"Прошлая неделя: {_progress_bar(last_pct)} {last}/{total} ({last_pct}%)")
+        lines.append(f"{trend}\n")
+
+    # Итого
+    total_this_pct = int(total_this / total_possible * 100) if total_possible else 0
+    total_last_pct = int(total_last / total_possible * 100) if total_possible else 0
+    total_diff = total_this_pct - total_last_pct
+
+    if total_diff > 0:
+        total_trend = f"📈 Общий прогресс лучше на {total_diff}%!"
+    elif total_diff < 0:
+        total_trend = f"📉 Общий прогресс хуже на {abs(total_diff)}%"
+    else:
+        total_trend = "➡️ Общий прогресс без изменений"
+
+    lines.append("─────────────────")
+    lines.append(f"*Итого:*")
+    lines.append(f"Эта неделя:     {_progress_bar(total_this_pct)} {total_this_pct}%")
+    lines.append(f"Прошлая неделя: {_progress_bar(total_last_pct)} {total_last_pct}%")
+    lines.append(total_trend)
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update): return
     dashboard_url = os.getenv("LOOKER_STUDIO_URL", "")
@@ -387,6 +448,7 @@ def main():
     app.add_handler(CommandHandler("remove", remove_habit))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("compare", compare))
     app.add_handler(CommandHandler("report", report))
     app.add_handler(CallbackQueryHandler(button_callback))
 
