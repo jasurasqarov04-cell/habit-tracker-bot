@@ -148,6 +148,44 @@ class SheetsHelper:
 
     # ── Статистика ────────────────────────────────────────────────────────
 
+    def get_weekly_comparison(self, user_id: str) -> dict:
+        """
+        Сравнивает эту неделю с прошлой.
+        Возвращает:
+        {
+          "Привычка": {
+            "this_week": 5,
+            "last_week": 4,
+            "total": 7
+          }
+        }
+        """
+        habits = self.get_habits(user_id)
+        if not habits:
+            return {}
+
+        ws = self._sheet(SHEET_CHECKINS)
+        records = ws.get_all_records()
+
+        today = datetime.now().date()
+        this_week = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+        last_week = [(today - timedelta(days=i + 7)).strftime("%Y-%m-%d") for i in range(7)]
+        all_dates = set(this_week + last_week)
+
+        user_checkins = {
+            (r["habit_name"], r["date"]): r["status"]
+            for r in records
+            if str(r["user_id"]) == user_id and r["date"] in all_dates
+        }
+
+        result = {}
+        for habit in habits:
+            this = sum(1 for d in this_week if user_checkins.get((habit, d)) == "done")
+            last = sum(1 for d in last_week if user_checkins.get((habit, d)) == "done")
+            result[habit] = {"this_week": this, "last_week": last, "total": 7}
+
+        return result
+
     def get_stats(self, user_id: str, days: int = 7) -> dict:
         """
         Возвращает:
