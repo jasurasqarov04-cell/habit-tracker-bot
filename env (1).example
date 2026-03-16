@@ -1,0 +1,18 @@
+# ─── Telegram ─────────────────────────────────────────────────────────────
+# Получи у @BotFather в Telegram → /newbot
+TELEGRAM_TOKEN=1234567890:AABBCCDDEEFFaabbccddeeff
+
+# ─── Google Sheets ────────────────────────────────────────────────────────
+# ID таблицы из URL: docs.google.com/spreadsheets/d/ВОТ_ЭТО_ID/edit
+SPREADSHEET_ID=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms
+
+# Путь к JSON-ключу сервисного аккаунта Google
+GOOGLE_CREDENTIALS_FILE=credentials.json
+
+# ─── Настройки ────────────────────────────────────────────────────────────
+# Твой часовой пояс: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+TIMEZONE=Asia/Tashkent
+
+# ─── Looker Studio ────────────────────────────────────────────────────────
+# Вставь ссылку на готовый дашборд (команда /report в боте)
+LOOKER_STUDIO_URL=https://lookerstudio.google.com/reporting/ВАШ_ID
