@@ -24,12 +24,21 @@ SHEET_CHECKINS = "Checkins"
 
 class SheetsHelper:
     def __init__(self):
-        creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-        spreadsheet_id = os.getenv("SPREADSHEET_ID")
+        import json
 
-        creds = Credentials.from_service_account_file(creds_file, scopes=SCOPES)
+        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+
+        if creds_json:
+            # Railway / любой сервер — берём JSON прямо из переменной окружения
+            creds_info = json.loads(creds_json)
+            creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        else:
+            # Локальный запуск — берём из файла credentials.json
+            creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+            creds = Credentials.from_service_account_file(creds_file, scopes=SCOPES)
+
         client = gspread.authorize(creds)
-        self.spreadsheet = client.open_by_key(spreadsheet_id)
+        self.spreadsheet = client.open_by_key(os.getenv("SPREADSHEET_ID"))
 
         self._ensure_sheets()
 
