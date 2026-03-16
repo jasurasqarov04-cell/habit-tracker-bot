@@ -430,7 +430,16 @@ def _build_habit_keyboard(habits: list, action: str) -> InlineKeyboardMarkup:
 
 def _progress_bar(pct: int, length: int = 10) -> str:
     filled = int(pct / 100 * length)
-    return "█" * filled + "░" * (length - filled)
+    empty = length - filled
+
+    if pct >= 70:
+        block = "🟩"
+    elif pct >= 40:
+        block = "🟨"
+    else:
+        block = "🟥"
+
+    return block * filled + "⬜" * empty
 
 
 # ─── Запуск ───────────────────────────────────────────────────────────────
