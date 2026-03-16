@@ -19,6 +19,19 @@ from sheets_helper import SheetsHelper
 
 load_dotenv()
 
+ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
+
+
+async def check_access(update: Update) -> bool:
+    """Проверяет что пользователь — владелец бота"""
+    if not ALLOWED_USER_ID:
+        return True  # если не задан — открытый доступ
+    if str(update.effective_user.id) != str(ALLOWED_USER_ID):
+        await update.message.reply_text("⛔ Этот бот приватный.")
+        return False
+    return True
+
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -33,6 +46,7 @@ sheets = SheetsHelper()
 # ─── Команды ───────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
     user = update.effective_user
     name = user.first_name
 
@@ -62,6 +76,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add_habit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
     user_id = str(update.effective_user.id)
 
     if not context.args:
@@ -84,6 +99,7 @@ async def add_habit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
     user_id = str(update.effective_user.id)
 
     if not context.args:
@@ -101,6 +117,7 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
     user_id = str(update.effective_user.id)
 
     if not context.args:
@@ -117,6 +134,7 @@ async def skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_habits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
     user_id = str(update.effective_user.id)
     habits = sheets.get_habits(user_id)
 
@@ -135,6 +153,7 @@ async def list_habits(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def remove_habit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
     user_id = str(update.effective_user.id)
 
     if not context.args:
@@ -155,6 +174,7 @@ async def remove_habit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
     user_id = str(update.effective_user.id)
     tz = pytz.timezone(TIMEZONE)
     today_date = datetime.now(tz).strftime("%Y-%m-%d")
@@ -183,6 +203,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
     user_id = str(update.effective_user.id)
     data = sheets.get_stats(user_id, days=7)
 
@@ -206,6 +227,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update): return
     dashboard_url = os.getenv("LOOKER_STUDIO_URL", "")
 
     if not dashboard_url:
