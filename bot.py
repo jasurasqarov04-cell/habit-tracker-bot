@@ -37,7 +37,6 @@ MAIN_KB = ReplyKeyboardMarkup([
     [KeyboardButton("✅ Сделано"),   KeyboardButton("📋 Планы на сегодня")],
     [KeyboardButton("➕ Добавить"),  KeyboardButton("📝 Список")],
     [KeyboardButton("🗑 Удалить"),   KeyboardButton("📊 Статистика")],
-    [KeyboardButton("📈 Дашборд")],
 ], resize_keyboard=True)
 
 CANCEL_KB = ReplyKeyboardMarkup(
