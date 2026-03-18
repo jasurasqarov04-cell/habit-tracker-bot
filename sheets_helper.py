@@ -1,6 +1,6 @@
 """
 Google Sheets Helper
-Вся работа с таблицей: пользователи, привычки, чекины, статистика
+Пользователи, привычки, чекины, планы, статистика
 """
 
 import os
@@ -16,10 +16,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# Названия листов в Google Sheets
 SHEET_USERS    = "Users"
 SHEET_HABITS   = "Habits"
 SHEET_CHECKINS = "Checkins"
+SHEET_PLANS    = "Plans"
 
 
 class SheetsHelper:
@@ -27,25 +27,20 @@ class SheetsHelper:
         import json
 
         creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-
         if creds_json:
-            # Railway / любой сервер — берём JSON прямо из переменной окружения
             creds_info = json.loads(creds_json)
             creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
         else:
-            # Локальный запуск — берём из файла credentials.json
             creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
             creds = Credentials.from_service_account_file(creds_file, scopes=SCOPES)
 
         client = gspread.authorize(creds)
         self.spreadsheet = client.open_by_key(os.getenv("SPREADSHEET_ID"))
-
         self._ensure_sheets()
 
     # ── Инициализация листов ──────────────────────────────────────────────
 
     def _ensure_sheets(self):
-        """Создаёт листы и заголовки если их нет"""
         existing = [ws.title for ws in self.spreadsheet.worksheets()]
 
         if SHEET_USERS not in existing:
@@ -57,8 +52,13 @@ class SheetsHelper:
             ws.append_row(["user_id", "habit_name", "created_at", "active"])
 
         if SHEET_CHECKINS not in existing:
-            ws = self.spreadsheet.add_worksheet(SHEET_CHECKINS, rows=50000, cols=6)
-            ws.append_row(["user_id", "habit_name", "date", "time", "status", "weekday"])
+            ws = self.spreadsheet.add_worksheet(SHEET_CHECKINS, rows=50000, cols=7)
+            # Добавили колонку amount
+            ws.append_row(["user_id", "habit_name", "date", "time", "status", "weekday", "amount"])
+
+        if SHEET_PLANS not in existing:
+            ws = self.spreadsheet.add_worksheet(SHEET_PLANS, rows=2000, cols=5)
+            ws.append_row(["user_id", "habit_name", "target_amount", "unit", "active"])
 
     def _sheet(self, name: str):
         return self.spreadsheet.worksheet(name)
@@ -76,7 +76,6 @@ class SheetsHelper:
             ])
 
     def get_all_users(self) -> list:
-        """Возвращает [(user_id, name), ...]"""
         ws = self._sheet(SHEET_USERS)
         records = ws.get_all_records()
         return [(str(r["user_id"]), r["name"]) for r in records if r.get("user_id")]
@@ -86,21 +85,13 @@ class SheetsHelper:
     def add_habit(self, user_id: str, habit_name: str) -> str:
         ws = self._sheet(SHEET_HABITS)
         records = ws.get_all_records()
-
-        # Проверяем дубликат
         for r in records:
-            if str(r["user_id"]) == user_id and r["habit_name"] == habit_name and r["active"] == "1":
+            if str(r["user_id"]) == user_id and r["habit_name"] == habit_name and str(r["active"]) == "1":
                 return "exists"
-
-        ws.append_row([
-            user_id, habit_name,
-            datetime.now().strftime("%Y-%m-%d"),
-            "1"
-        ])
+        ws.append_row([user_id, habit_name, datetime.now().strftime("%Y-%m-%d"), "1"])
         return "added"
 
     def get_habits(self, user_id: str) -> list:
-        """Возвращает список активных привычек пользователя"""
         ws = self._sheet(SHEET_HABITS)
         records = ws.get_all_records()
         return [
@@ -111,32 +102,106 @@ class SheetsHelper:
     def remove_habit(self, user_id: str, habit_name: str) -> bool:
         ws = self._sheet(SHEET_HABITS)
         records = ws.get_all_records()
-
-        for i, r in enumerate(records, start=2):  # строки начинаются с 2 (1 = заголовок)
+        for i, r in enumerate(records, start=2):
             if str(r["user_id"]) == user_id and r["habit_name"] == habit_name:
-                ws.update_cell(i, 4, "0")  # колонка active = 0
+                ws.update_cell(i, 4, "0")
+                return True
+        return False
+
+    # ── Планы (цели по количеству) ────────────────────────────────────────
+
+    def set_plan(self, user_id: str, habit_name: str, target_amount: float, unit: str) -> str:
+        """
+        Устанавливает план для привычки.
+        Если план уже есть — обновляет. Иначе создаёт новый.
+        Возвращает: 'updated' или 'created'
+        """
+        ws = self._sheet(SHEET_PLANS)
+        records = ws.get_all_records()
+
+        for i, r in enumerate(records, start=2):
+            if str(r["user_id"]) == user_id and r["habit_name"] == habit_name and str(r["active"]) == "1":
+                ws.update_cell(i, 3, target_amount)
+                ws.update_cell(i, 4, unit)
+                return "updated"
+
+        ws.append_row([user_id, habit_name, target_amount, unit, "1"])
+        return "created"
+
+    def get_plan(self, user_id: str, habit_name: str) -> dict | None:
+        """
+        Возвращает план для привычки или None.
+        Формат: {"target_amount": 50, "unit": "раз"}
+        """
+        ws = self._sheet(SHEET_PLANS)
+        records = ws.get_all_records()
+        for r in records:
+            if (str(r["user_id"]) == user_id
+                    and r["habit_name"] == habit_name
+                    and str(r["active"]) == "1"):
+                try:
+                    return {
+                        "target_amount": float(r["target_amount"]),
+                        "unit": str(r["unit"]),
+                    }
+                except (ValueError, KeyError):
+                    return None
+        return None
+
+    def get_all_plans(self, user_id: str) -> dict:
+        """
+        Возвращает все планы пользователя.
+        Формат: {"Привычка": {"target_amount": 50, "unit": "раз"}}
+        """
+        ws = self._sheet(SHEET_PLANS)
+        records = ws.get_all_records()
+        result = {}
+        for r in records:
+            if str(r["user_id"]) == user_id and str(r["active"]) == "1":
+                try:
+                    result[r["habit_name"]] = {
+                        "target_amount": float(r["target_amount"]),
+                        "unit": str(r["unit"]),
+                    }
+                except (ValueError, KeyError):
+                    pass
+        return result
+
+    def remove_plan(self, user_id: str, habit_name: str) -> bool:
+        ws = self._sheet(SHEET_PLANS)
+        records = ws.get_all_records()
+        for i, r in enumerate(records, start=2):
+            if str(r["user_id"]) == user_id and r["habit_name"] == habit_name:
+                ws.update_cell(i, 5, "0")
                 return True
         return False
 
     # ── Чекины ───────────────────────────────────────────────────────────
 
-    def record_checkin(self, user_id: str, habit_name: str, status: str, date_str: str, time_str: str):
+    def record_checkin(self, user_id: str, habit_name: str, status: str,
+                       date_str: str, time_str: str, amount: float = 0):
+        """
+        Записывает чекин с количеством (amount).
+        Если за этот день уже есть запись — обновляет статус и добавляет к amount.
+        """
         ws = self._sheet(SHEET_CHECKINS)
         records = ws.get_all_records()
 
-        # Удаляем старый чекин за тот же день (если был)
         for i, r in enumerate(records, start=2):
             if (str(r["user_id"]) == user_id
                     and r["habit_name"] == habit_name
                     and r["date"] == date_str):
-                ws.update_cell(i, 5, status)  # просто обновляем статус
+                ws.update_cell(i, 5, status)
+                # Суммируем количество (если вводят несколько раз за день)
+                old_amount = float(r.get("amount", 0) or 0)
+                new_amount = old_amount + amount if amount > 0 else old_amount
+                ws.update_cell(i, 7, new_amount)
                 return
 
         weekday = datetime.strptime(date_str, "%Y-%m-%d").strftime("%A")
-        ws.append_row([user_id, habit_name, date_str, time_str, status, weekday])
+        ws.append_row([user_id, habit_name, date_str, time_str, status, weekday, amount])
 
     def get_done_today(self, user_id: str, date_str: str) -> set:
-        """Возвращает множество привычек, выполненных сегодня"""
         ws = self._sheet(SHEET_CHECKINS)
         records = ws.get_all_records()
         return {
@@ -146,20 +211,25 @@ class SheetsHelper:
             and r["status"] == "done"
         }
 
+    def get_today_amounts(self, user_id: str, date_str: str) -> dict:
+        """
+        Возвращает сколько выполнено сегодня по каждой привычке.
+        Формат: {"Привычка": 45.0}
+        """
+        ws = self._sheet(SHEET_CHECKINS)
+        records = ws.get_all_records()
+        result = {}
+        for r in records:
+            if str(r["user_id"]) == user_id and r["date"] == date_str:
+                try:
+                    result[r["habit_name"]] = float(r.get("amount", 0) or 0)
+                except (ValueError, TypeError):
+                    result[r["habit_name"]] = 0.0
+        return result
+
     # ── Статистика ────────────────────────────────────────────────────────
 
     def get_weekly_comparison(self, user_id: str) -> dict:
-        """
-        Сравнивает эту неделю с прошлой.
-        Возвращает:
-        {
-          "Привычка": {
-            "this_week": 5,
-            "last_week": 4,
-            "total": 7
-          }
-        }
-        """
         habits = self.get_habits(user_id)
         if not habits:
             return {}
@@ -188,12 +258,14 @@ class SheetsHelper:
 
     def get_stats(self, user_id: str, days: int = 7) -> dict:
         """
-        Возвращает:
+        Возвращает статистику за N дней.
+        Если есть план — добавляет данные о количестве.
+        Формат:
         {
           "Привычка": {
-            "done": 5,
-            "total": 7,
-            "streak": 3
+            "done": 5, "total": 7, "streak": 3,
+            "plan": {"target_amount": 50, "unit": "раз"},   # если задан план
+            "today_amount": 45.0                             # сегодня выполнено
           }
         }
         """
@@ -203,17 +275,26 @@ class SheetsHelper:
 
         ws = self._sheet(SHEET_CHECKINS)
         records = ws.get_all_records()
+        plans = self.get_all_plans(user_id)
 
-        # Даты за последние N дней
         today = datetime.now().date()
+        today_str = today.strftime("%Y-%m-%d")
         date_range = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
 
-        # Чекины пользователя за период
         user_checkins = {
             (r["habit_name"], r["date"]): r["status"]
             for r in records
             if str(r["user_id"]) == user_id and r["date"] in date_range
         }
+
+        # Количество за сегодня
+        today_amounts = {}
+        for r in records:
+            if str(r["user_id"]) == user_id and r["date"] == today_str:
+                try:
+                    today_amounts[r["habit_name"]] = float(r.get("amount", 0) or 0)
+                except (ValueError, TypeError):
+                    today_amounts[r["habit_name"]] = 0.0
 
         result = {}
         for habit in habits:
@@ -221,19 +302,23 @@ class SheetsHelper:
                 1 for d in date_range
                 if user_checkins.get((habit, d)) == "done"
             )
-
-            # Считаем текущую серию (streak)
             streak = 0
-            for d in date_range:  # идём от сегодня назад
+            for d in date_range:
                 if user_checkins.get((habit, d)) == "done":
                     streak += 1
                 else:
                     break
 
-            result[habit] = {
+            entry = {
                 "done": done_count,
                 "total": days,
-                "streak": streak
+                "streak": streak,
+                "today_amount": today_amounts.get(habit, 0.0),
             }
+
+            if habit in plans:
+                entry["plan"] = plans[habit]
+
+            result[habit] = entry
 
         return result
