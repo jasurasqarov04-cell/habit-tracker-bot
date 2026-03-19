@@ -1,644 +1,532 @@
 """
-Habit Tracker Bot — клавиатурные кнопки + пошаговое добавление
+Habit Tracker Bot — категории, кнопки, пошаговое добавление
 """
-
-import os
-import logging
+import os, logging
 from datetime import datetime, time
 import pytz
 from dotenv import load_dotenv
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ConversationHandler, filters, ContextTypes
-)
-
+from telegram import (Update, ReplyKeyboardMarkup, KeyboardButton,
+                       InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo)
+from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
+                           MessageHandler, ConversationHandler, filters, ContextTypes)
 from sheets_helper import SheetsHelper
 
 load_dotenv()
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
-ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
-TIMEZONE        = os.getenv("TIMEZONE", "Asia/Tashkent")
-DASHBOARD_URL   = os.getenv("DASHBOARD_URL", "")
+TOKEN        = os.getenv("TELEGRAM_TOKEN")
+ALLOWED_UID  = os.getenv("ALLOWED_USER_ID")
+TZ           = os.getenv("TIMEZONE", "Asia/Tashkent")
+DASHBOARD    = os.getenv("DASHBOARD_URL", "")
 
 sheets = SheetsHelper()
 
 # ── Conversation states ───────────────────────────────────────────────────────
-ADD_NAME, ADD_PLAN_AMOUNT, ADD_PLAN_UNIT = range(3)
-DONE_AMOUNT = 10
-DELETE_CONFIRM = 20
+(ADD_NAME, ADD_CAT, ADD_CAT_NEW, ADD_PLAN_AMT, ADD_PLAN_UNIT) = range(5)
+DONE_AMT = 10
+CAT_MENU, CAT_NAME, CAT_TARGET = 20, 21, 22
 
-# ── Main keyboard ─────────────────────────────────────────────────────────────
+# ── Keyboard ─────────────────────────────────────────────────────────────────
 MAIN_KB = ReplyKeyboardMarkup([
-    [KeyboardButton("✅ Сделано"),   KeyboardButton("📋 Планы на сегодня")],
-    [KeyboardButton("➕ Добавить"),  KeyboardButton("📝 Список")],
-    [KeyboardButton("🗑 Удалить"),   KeyboardButton("📊 Статистика")],
+    [KeyboardButton("✅ Сделано"),      KeyboardButton("📋 Планы на сегодня")],
+    [KeyboardButton("➕ Добавить"),     KeyboardButton("📝 Список")],
+    [KeyboardButton("🗑 Удалить"),      KeyboardButton("📊 Статистика")],
+    [KeyboardButton("🗂 Категории")],
 ], resize_keyboard=True)
 
-CANCEL_KB = ReplyKeyboardMarkup(
-    [[KeyboardButton("❌ Отмена")]], resize_keyboard=True
-)
+CANCEL_KB = ReplyKeyboardMarkup([[KeyboardButton("❌ Отмена")]], resize_keyboard=True)
 
+def tz(): return pytz.timezone(TZ)
+def today(): return datetime.now(tz()).strftime("%Y-%m-%d")
+def now_time(): return datetime.now(tz()).strftime("%H:%M")
+def fa(v): return str(int(v)) if float(v)==int(float(v)) else str(v)
 
-async def check_access(update: Update) -> bool:
-    if not ALLOWED_USER_ID:
-        return True
-    if str(update.effective_user.id) != str(ALLOWED_USER_ID):
-        await update.message.reply_text("Этот бот приватный.")
-        return False
+def pbar(pct, n=8):
+    f=int(pct/100*n); e=n-f
+    b="🟩" if pct>=70 else "🟨" if pct>=40 else "🟥"
+    return b*f+"⬜"*e
+
+async def check(update):
+    if not ALLOWED_UID: return True
+    if str(update.effective_user.id)!=str(ALLOWED_UID):
+        await update.message.reply_text("Приватный бот."); return False
     return True
 
-
-def get_tz():
-    return pytz.timezone(TIMEZONE)
-
-
-def today_str():
-    return datetime.now(get_tz()).strftime("%Y-%m-%d")
-
-
-def time_str():
-    return datetime.now(get_tz()).strftime("%H:%M")
-
-
-def fmt_amount(v: float) -> str:
-    return str(int(v)) if v == int(v) else str(v)
-
-
-def progress_bar(pct: int, length: int = 8) -> str:
-    filled = int(pct / 100 * length)
-    empty  = length - filled
-    if pct >= 70:   block = "🟩"
-    elif pct >= 40: block = "🟨"
-    else:           block = "🟥"
-    return block * filled + "⬜" * empty
-
-
 # ── /start ────────────────────────────────────────────────────────────────────
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    u=update.effective_user
+    sheets.register_user(str(u.id), u.first_name)
+    await update.message.reply_text(f"Привет, {u.first_name}! 👋\n\nВыбери действие:", reply_markup=MAIN_KB)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update): return
-    user = update.effective_user
-    sheets.register_user(str(user.id), user.first_name)
-    await update.message.reply_text(
-        f"Привет, {user.first_name}! 👋\n\nВыбери действие:",
-        reply_markup=MAIN_KB
-    )
-
-
-# ── ДОБАВИТЬ ЗАДАЧУ (пошагово) ────────────────────────────────────────────────
-
-async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update): return
-    await update.message.reply_text(
-        "Введи название задачи/привычки:\n\nНапример: Отжимания",
-        reply_markup=CANCEL_KB
-    )
+# ── ДОБАВИТЬ ЗАДАЧУ ───────────────────────────────────────────────────────────
+async def add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    await update.message.reply_text("Введи название задачи:\n\nНапример: Отжимания", reply_markup=CANCEL_KB)
     return ADD_NAME
 
-
-async def add_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if text == "❌ Отмена":
-        return await cancel(update, context)
+    if text == "❌ Отмена": return await cancel(update, ctx)
+    ctx.user_data['new_habit'] = text
 
-    user_id = str(update.effective_user.id)
-    result  = sheets.add_habit(user_id, text)
-    context.user_data['new_habit'] = text
+    uid  = str(update.effective_user.id)
+    cats = sheets.get_categories(uid)
 
-    if result == "exists":
+    if cats:
+        buttons = [[InlineKeyboardButton(c["name"], callback_data=f"add_cat:{c['name']}")] for c in cats]
+        buttons.append([InlineKeyboardButton("➕ Новая категория", callback_data="add_cat:__new__")])
+        buttons.append([InlineKeyboardButton("Без категории", callback_data="add_cat:__none__")])
         await update.message.reply_text(
-            f"Задача «{text}» уже есть.\n\nТеперь задай план — сколько нужно делать?\n"
-            "Введи число (например: 50) или напиши «нет» чтобы пропустить:",
-            reply_markup=CANCEL_KB
+            f"Задача: {text}\n\nВыбери категорию:",
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
+        return ADD_CAT
     else:
+        # No categories yet → ask to create one or skip
         await update.message.reply_text(
-            f"✅ Задача «{text}» добавлена!\n\n"
-            "Теперь задай план — сколько нужно делать?\n"
-            "Введи число (например: 50) или напиши «нет» чтобы пропустить:",
+            f"Задача: {text}\n\n"
+            "У тебя нет категорий.\n"
+            "Введи название новой категории или напиши «нет»:",
             reply_markup=CANCEL_KB
         )
-    return ADD_PLAN_AMOUNT
+        return ADD_CAT_NEW
 
+async def add_cat_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    uid  = str(q.from_user.id)
+    data = q.data.split(":", 1)[1]
 
-async def add_get_plan_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if data == "__new__":
+        await q.edit_message_text("Введи название новой категории:")
+        return ADD_CAT_NEW
+    elif data == "__none__":
+        ctx.user_data['new_cat'] = "Без категории"
+    else:
+        ctx.user_data['new_cat'] = data
+
+    await q.edit_message_text(
+        f"Задача: {ctx.user_data['new_habit']}\n"
+        f"Категория: {ctx.user_data['new_cat']}\n\n"
+        "Задай план — сколько нужно делать?\n"
+        "Введи число или «нет»:"
+    )
+    return ADD_PLAN_AMT
+
+async def add_cat_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if text == "❌ Отмена":
-        return await cancel(update, context)
+    if text == "❌ Отмена": return await cancel(update, ctx)
+    uid = str(update.effective_user.id)
 
-    if text.lower() in ("нет", "no", "skip", "-"):
-        habit = context.user_data.get('new_habit', '')
+    if text.lower() in ("нет","no","-","skip","без категории"):
+        ctx.user_data['new_cat'] = "Без категории"
+    else:
+        ctx.user_data['new_cat'] = text
+        sheets.add_category(uid, text, target_pct=80)
+
+    await update.message.reply_text(
+        f"Задача: {ctx.user_data['new_habit']}\n"
+        f"Категория: {ctx.user_data['new_cat']}\n\n"
+        "Задай план — сколько нужно делать?\n"
+        "Введи число или «нет»:",
+        reply_markup=CANCEL_KB
+    )
+    return ADD_PLAN_AMT
+
+async def add_plan_amt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "❌ Отмена": return await cancel(update, ctx)
+    uid   = str(update.effective_user.id)
+    habit = ctx.user_data.get('new_habit','')
+    cat   = ctx.user_data.get('new_cat','Без категории')
+
+    sheets.add_habit(uid, habit, cat)
+
+    if text.lower() in ("нет","no","-","skip"):
         await update.message.reply_text(
-            f"Задача «{habit}» добавлена без плана.\n\nОтмечай выполнение кнопкой «✅ Сделано»",
+            f"✅ Задача «{habit}» добавлена!\nКатегория: {cat}\n\nОтмечай кнопкой «✅ Сделано»",
             reply_markup=MAIN_KB
         )
         return ConversationHandler.END
 
     try:
-        amount = float(text.replace(",", "."))
-        context.user_data['plan_amount'] = amount
+        ctx.user_data['plan_amt'] = float(text.replace(",","."))
         await update.message.reply_text(
-            f"Отлично! {fmt_amount(amount)} — это сколько?\n\n"
-            "Введи единицу измерения:\n"
-            "раз / минут / км / страниц / стаканов / часов / или своё",
+            "Единица измерения:",
             reply_markup=ReplyKeyboardMarkup([
                 [KeyboardButton("раз"),    KeyboardButton("минут")],
                 [KeyboardButton("км"),     KeyboardButton("страниц")],
-                [KeyboardButton("стаканов"), KeyboardButton("часов")],
+                [KeyboardButton("стаканов"),KeyboardButton("часов")],
                 [KeyboardButton("❌ Отмена")],
             ], resize_keyboard=True)
         )
         return ADD_PLAN_UNIT
     except ValueError:
-        await update.message.reply_text(
-            "Введи число, например: 50\nИли напиши «нет» чтобы пропустить план:"
-        )
-        return ADD_PLAN_AMOUNT
+        await update.message.reply_text("Введи число или «нет»:"); return ADD_PLAN_AMT
 
-
-async def add_get_plan_unit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_plan_unit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if text == "❌ Отмена":
-        return await cancel(update, context)
-
-    user_id = str(update.effective_user.id)
-    habit   = context.user_data.get('new_habit', '')
-    amount  = context.user_data.get('plan_amount', 0)
-    unit    = text
-
-    sheets.set_plan(user_id, habit, amount, unit)
-
+    if text == "❌ Отмена": return await cancel(update, ctx)
+    uid   = str(update.effective_user.id)
+    habit = ctx.user_data.get('new_habit','')
+    cat   = ctx.user_data.get('new_cat','Без категории')
+    amt   = ctx.user_data.get('plan_amt',0)
+    sheets.set_plan(uid, habit, amt, text)
     await update.message.reply_text(
-        f"🎯 План задан!\n\n"
-        f"Задача: {habit}\n"
-        f"Цель: {fmt_amount(amount)} {unit} в день\n\n"
-        f"Отмечай выполнение кнопкой «✅ Сделано»",
+        f"✅ Задача «{habit}» добавлена!\n"
+        f"Категория: {cat}\n"
+        f"План: {fa(amt)} {text} в день\n\n"
+        "Отмечай кнопкой «✅ Сделано»",
         reply_markup=MAIN_KB
     )
     return ConversationHandler.END
 
-
-# ── СДЕЛАНО — выбор задачи + ввод количества ─────────────────────────────────
-
-async def done_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update): return
-    user_id = str(update.effective_user.id)
-    habits  = sheets.get_habits(user_id)
-    plans   = sheets.get_all_plans(user_id)
-    amounts = sheets.get_today_amounts(user_id, today_str())
+# ── СДЕЛАНО ───────────────────────────────────────────────────────────────────
+async def done_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid    = str(update.effective_user.id)
+    habits = sheets.get_habits(uid)
+    plans  = sheets.get_all_plans(uid)
+    amts   = sheets.get_today_amounts(uid, today())
 
     if not habits:
-        await update.message.reply_text(
-            "У тебя нет задач. Нажми «➕ Добавить»",
-            reply_markup=MAIN_KB
-        )
+        await update.message.reply_text("Нет задач. Нажми «➕ Добавить»", reply_markup=MAIN_KB)
         return ConversationHandler.END
 
-    # Build inline keyboard with habits
     buttons = []
     for h in habits:
-        plan = plans.get(h)
-        done = amounts.get(h, 0.0)
-        if plan and plan["target_amount"] > 0:
-            target = plan["target_amount"]
-            unit   = plan["unit"]
-            pct    = min(int(done / target * 100), 100)
-            label  = f"{h}  {fmt_amount(done)}/{fmt_amount(target)} {unit} ({pct}%)"
-        else:
-            label = h
-        buttons.append([InlineKeyboardButton(label, callback_data=f"done_pick:{h}")])
+        plan=plans.get(h); done=amts.get(h,0.0)
+        if plan and plan["target_amount"]>0:
+            t=plan["target_amount"]; u=plan["unit"]
+            pct=min(int(done/t*100),100)
+            label=f"{h}  {fa(done)}/{fa(t)} {u} ({pct}%)"
+        else: label=h
+        buttons.append([InlineKeyboardButton(label, callback_data=f"dp:{h}")])
 
-    await update.message.reply_text(
-        "Выбери задачу:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-    return ConversationHandler.END
+    await update.message.reply_text("Выбери задачу:", reply_markup=InlineKeyboardMarkup(buttons))
+    return DONE_AMT
 
+async def done_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer()
+    h=q.data.split(":",1)[1]; uid=str(q.from_user.id)
+    ctx.user_data['done_habit']=h
+    plan=sheets.get_plan(uid,h)
 
-async def done_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    habit_name = query.data.split(":", 1)[1]
-    user_id    = str(query.from_user.id)
-    plan       = sheets.get_plan(user_id, habit_name)
-    context.user_data['done_habit'] = habit_name
-
-    if plan and plan["target_amount"] > 0:
-        target = plan["target_amount"]
-        unit   = plan["unit"]
-        amounts = sheets.get_today_amounts(user_id, today_str())
-        done_so_far = amounts.get(habit_name, 0.0)
-        remaining   = max(target - done_so_far, 0)
-
-        await query.edit_message_text(
-            f"✅ {habit_name}\n\n"
-            f"План: {fmt_amount(target)} {unit}\n"
-            f"Уже сделано сегодня: {fmt_amount(done_so_far)} {unit}\n"
-            f"Осталось: {fmt_amount(remaining)} {unit}\n\n"
-            f"Сколько сделал сейчас? Введи число:"
+    if plan and plan["target_amount"]>0:
+        t=plan["target_amount"]; u=plan["unit"]
+        amts=sheets.get_today_amounts(uid,today())
+        done=amts.get(h,0.0); rem=max(t-done,0)
+        await q.edit_message_text(
+            f"✅ {h}\n\nПлан: {fa(t)} {u}\nСделано: {fa(done)} {u}\nОсталось: {fa(rem)} {u}\n\nСколько сделал сейчас?"
         )
-        return DONE_AMOUNT
+        return DONE_AMT
     else:
-        # No plan — just mark done
-        sheets.record_checkin(user_id, habit_name, "done", today_str(), time_str(), 0)
-        await query.edit_message_text(f"✅ {habit_name} — выполнено!")
+        sheets.record_checkin(uid,h,"done",today(),now_time(),0)
+        await q.edit_message_text(f"✅ {h} — выполнено!")
         return ConversationHandler.END
 
-
-async def done_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text == "❌ Отмена":
-        return await cancel(update, context)
-
-    user_id    = str(update.effective_user.id)
-    habit_name = context.user_data.get('done_habit', '')
-
-    try:
-        amount = float(text.replace(",", "."))
+async def done_amt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text=update.message.text.strip()
+    if text=="❌ Отмена": return await cancel(update,ctx)
+    uid=str(update.effective_user.id); h=ctx.user_data.get('done_habit','')
+    try: amt=float(text.replace(",","."))
     except ValueError:
-        await update.message.reply_text("Введи число, например: 45")
-        return DONE_AMOUNT
+        await update.message.reply_text("Введи число:"); return DONE_AMT
 
-    sheets.record_checkin(user_id, habit_name, "done", today_str(), time_str(), amount)
-
-    plan = sheets.get_plan(user_id, habit_name)
-    if plan and plan["target_amount"] > 0:
-        target = plan["target_amount"]
-        unit   = plan["unit"]
-        amounts = sheets.get_today_amounts(user_id, today_str())
-        total_done = amounts.get(habit_name, amount)
-        pct  = min(int(total_done / target * 100), 100)
-        bar  = progress_bar(pct)
-
-        msg = (
-            f"✅ {habit_name}\n\n"
-            f"{bar} {fmt_amount(total_done)}/{fmt_amount(target)} {unit} ({pct}%)"
-        )
-        if pct >= 100:
-            msg += "\n\n🎉 Цель достигнута!"
-    else:
-        msg = f"✅ {habit_name} — выполнено!"
-
+    sheets.record_checkin(uid,h,"done",today(),now_time(),amt)
+    plan=sheets.get_plan(uid,h)
+    if plan and plan["target_amount"]>0:
+        t=plan["target_amount"]; u=plan["unit"]
+        amts=sheets.get_today_amounts(uid,today())
+        total=amts.get(h,amt); pct=min(int(total/t*100),100)
+        msg=f"✅ {h}\n\n{pbar(pct)} {fa(total)}/{fa(t)} {u} ({pct}%)"
+        if pct>=100: msg+="\n\n🎉 Цель достигнута!"
+    else: msg=f"✅ {h} — выполнено!"
     await update.message.reply_text(msg, reply_markup=MAIN_KB)
     return ConversationHandler.END
 
-
-# ── ПЛАНЫ НА СЕГОДНЯ ─────────────────────────────────────────────────────────
-
-async def plans_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update): return
-    user_id = str(update.effective_user.id)
-    habits  = sheets.get_habits(user_id)
-    plans   = sheets.get_all_plans(user_id)
-    amounts = sheets.get_today_amounts(user_id, today_str())
-    done_today = sheets.get_done_today(user_id, today_str())
-    tz     = get_tz()
-    date_display = datetime.now(tz).strftime("%d.%m.%Y")
-
+# ── ПЛАНЫ НА СЕГОДНЯ ──────────────────────────────────────────────────────────
+async def plans_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid=str(update.effective_user.id)
+    habits=sheets.get_habits(uid); plans=sheets.get_all_plans(uid)
+    amts=sheets.get_today_amounts(uid,today()); done_set=sheets.get_done_today(uid,today())
     if not habits:
-        await update.message.reply_text("Нет задач. Нажми «➕ Добавить»", reply_markup=MAIN_KB)
-        return
+        await update.message.reply_text("Нет задач.", reply_markup=MAIN_KB); return
 
-    lines = [f"📋 Планы на сегодня — {date_display}\n"]
-    done_count = 0
-    total = len(habits)
-
+    lines=[f"📋 {datetime.now(tz()).strftime('%d.%m.%Y')}\n"]
+    done_count=0
     for h in habits:
-        plan   = plans.get(h)
-        done_v = amounts.get(h, 0.0)
-        is_done = h in done_today
-
-        if plan and plan["target_amount"] > 0:
-            target = plan["target_amount"]
-            unit   = plan["unit"]
-            pct    = min(int(done_v / target * 100), 100)
-            bar    = progress_bar(pct, length=6)
-
-            if done_v >= target:
-                status = "✅"
-                done_count += 1
-            elif done_v > 0:
-                status = "🔄"
-            else:
-                status = "⬜"
-
-            lines.append(f"{status} {h}")
-            lines.append(f"   {bar} {fmt_amount(done_v)}/{fmt_amount(target)} {unit} ({pct}%)")
+        plan=plans.get(h); done_v=amts.get(h,0.0); is_done=h in done_set
+        if plan and plan["target_amount"]>0:
+            t=plan["target_amount"]; u=plan["unit"]
+            pct=min(int(done_v/t*100),100); bar=pbar(pct,6)
+            if done_v>=t: icon="✅"; done_count+=1
+            elif done_v>0: icon="🔄"
+            else: icon="⬜"
+            lines.append(f"{icon} {h}\n   {bar} {fa(done_v)}/{fa(t)} {u} ({pct}%)")
         else:
-            if is_done:
-                lines.append(f"✅ {h}")
-                done_count += 1
-            else:
-                lines.append(f"⬜ {h}")
+            if is_done: icon="✅"; done_count+=1
+            else: icon="⬜"
+            lines.append(f"{icon} {h}")
 
-    overall_pct = int(done_count / total * 100) if total else 0
-    bar = progress_bar(overall_pct)
-    lines.append(f"\n{bar} {done_count}/{total} ({overall_pct}%)")
-
+    total=len(habits); op=int(done_count/total*100) if total else 0
+    lines.append(f"\n{pbar(op)} {done_count}/{total} ({op}%)")
     await update.message.reply_text("\n".join(lines), reply_markup=MAIN_KB)
-
 
 # ── СПИСОК ────────────────────────────────────────────────────────────────────
+async def list_habits(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid=str(update.effective_user.id)
+    habits_info=sheets.get_habits_with_category(uid)
+    plans=sheets.get_all_plans(uid)
+    if not habits_info:
+        await update.message.reply_text("Нет задач.", reply_markup=MAIN_KB); return
 
-async def list_habits(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update): return
-    user_id = str(update.effective_user.id)
-    habits  = sheets.get_habits(user_id)
-    plans   = sheets.get_all_plans(user_id)
+    # Group by category
+    by_cat={}
+    for h in habits_info:
+        by_cat.setdefault(h["category"],[]).append(h["name"])
 
-    if not habits:
-        await update.message.reply_text("Нет задач. Нажми «➕ Добавить»", reply_markup=MAIN_KB)
-        return
-
-    lines = ["📝 Твои задачи:\n"]
-    for i, h in enumerate(habits, 1):
-        plan = plans.get(h)
-        if plan:
-            lines.append(f"{i}. {h} — план: {fmt_amount(plan['target_amount'])} {plan['unit']}")
-        else:
-            lines.append(f"{i}. {h}")
-
+    lines=["📝 Задачи:\n"]
+    for cat,hs in by_cat.items():
+        lines.append(f"📁 {cat}")
+        for h in hs:
+            p=plans.get(h)
+            if p: lines.append(f"  • {h} — {fa(p['target_amount'])} {p['unit']}")
+            else: lines.append(f"  • {h}")
+        lines.append("")
     await update.message.reply_text("\n".join(lines), reply_markup=MAIN_KB)
 
-
 # ── УДАЛИТЬ ───────────────────────────────────────────────────────────────────
-
-async def delete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update): return
-    user_id = str(update.effective_user.id)
-    habits  = sheets.get_habits(user_id)
-
+async def delete_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid=str(update.effective_user.id); habits=sheets.get_habits(uid)
     if not habits:
-        await update.message.reply_text("Нет задач для удаления.", reply_markup=MAIN_KB)
+        await update.message.reply_text("Нет задач.", reply_markup=MAIN_KB)
         return ConversationHandler.END
-
-    buttons = [[InlineKeyboardButton(h, callback_data=f"del_pick:{h}")] for h in habits]
-    await update.message.reply_text(
-        "Какую задачу удалить?",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    btns=[[InlineKeyboardButton(h,callback_data=f"del:{h}")] for h in habits]
+    await update.message.reply_text("Какую задачу удалить?", reply_markup=InlineKeyboardMarkup(btns))
     return ConversationHandler.END
 
+async def delete_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer()
+    h=q.data.split(":",1)[1]
+    btns=InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да",callback_data=f"delok:{h}"),
+        InlineKeyboardButton("❌ Нет",callback_data="delno"),
+    ]])
+    await q.edit_message_text(f"Удалить «{h}»?\nПлан тоже удалится.", reply_markup=btns)
 
-async def delete_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def delete_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer()
+    if q.data=="delno": await q.edit_message_text("Отменено."); return
+    h=q.data.split(":",1)[1]; uid=str(q.from_user.id)
+    sheets.remove_habit(uid,h); sheets.remove_plan(uid,h)
+    await q.edit_message_text(f"🗑 «{h}» удалена.")
 
-    habit_name = query.data.split(":", 1)[1]
-    user_id    = str(query.from_user.id)
+# ── КАТЕГОРИИ ─────────────────────────────────────────────────────────────────
+async def cats_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid=str(update.effective_user.id); cats=sheets.get_categories(uid)
+    lines=["🗂 Категории:\n"]
+    if cats:
+        for c in cats: lines.append(f"• {c['name']} — план: {c['target_pct']}%")
+    else: lines.append("Нет категорий.")
+    lines.append("\n/addcat Название 80 — добавить категорию\n/delcat Название — удалить\n/settarget Название 85 — изменить цель")
+    await update.message.reply_text("\n".join(lines), reply_markup=MAIN_KB)
 
-    buttons = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Да, удалить", callback_data=f"del_confirm:{habit_name}"),
-            InlineKeyboardButton("❌ Отмена",      callback_data="del_cancel"),
-        ]
-    ])
-    await query.edit_message_text(
-        f"Удалить задачу «{habit_name}»?\nПлан тоже удалится автоматически.",
-        reply_markup=buttons
-    )
+async def add_cat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid=str(update.effective_user.id)
+    if len(ctx.args)<1:
+        await update.message.reply_text("Формат: /addcat Здоровье 80"); return
+    target=80
+    if len(ctx.args)>=2:
+        try: target=int(ctx.args[-1]); name=" ".join(ctx.args[:-1])
+        except: name=" ".join(ctx.args)
+    else: name=ctx.args[0]
+    result=sheets.add_category(uid,name,target)
+    if result=="exists":
+        await update.message.reply_text(f"Категория «{name}» уже есть.")
+    else:
+        await update.message.reply_text(f"✅ Категория «{name}» добавлена!\nЦель: {target}%")
 
+async def del_cat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid=str(update.effective_user.id)
+    if not ctx.args: await update.message.reply_text("Формат: /delcat Здоровье"); return
+    name=" ".join(ctx.args)
+    sheets.remove_category(uid,name)
+    await update.message.reply_text(f"Категория «{name}» удалена.")
 
-async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == "del_cancel":
-        await query.edit_message_text("Отменено.")
-        return
-
-    habit_name = data.split(":", 1)[1]
-    user_id    = str(query.from_user.id)
-
-    sheets.remove_habit(user_id, habit_name)
-    sheets.remove_plan(user_id, habit_name)  # auto-remove plan
-
-    await query.edit_message_text(f"🗑 Задача «{habit_name}» и её план удалены.")
-
+async def set_target_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid=str(update.effective_user.id)
+    if len(ctx.args)<2: await update.message.reply_text("Формат: /settarget Здоровье 85"); return
+    try:
+        target=int(ctx.args[-1]); name=" ".join(ctx.args[:-1])
+        sheets.set_category_target(uid,name,target)
+        await update.message.reply_text(f"Цель для «{name}» изменена на {target}%")
+    except ValueError:
+        await update.message.reply_text("Цель должна быть числом, например: 85")
 
 # ── СТАТИСТИКА ────────────────────────────────────────────────────────────────
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update): return
-    user_id = str(update.effective_user.id)
-    data    = sheets.get_stats(user_id, days=7)
+async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid=str(update.effective_user.id)
+    data=sheets.get_stats(uid,days=7)
+    cat_stats=sheets.get_category_stats(uid,days=30)
 
     if not data:
-        await update.message.reply_text("Нет данных. Начни отмечать задачи!", reply_markup=MAIN_KB)
-        return
+        await update.message.reply_text("Нет данных.", reply_markup=MAIN_KB); return
 
-    lines = ["📊 Статистика за 7 дней:\n"]
-    for habit, info in data.items():
-        done_days = info["done"]
-        total     = info["total"]
-        pct       = int(done_days / total * 100) if total > 0 else 0
-        bar       = progress_bar(pct)
-        streak    = info.get("streak", 0)
-        streak_str = f"  🔥{streak}" if streak >= 2 else ""
-        plan       = info.get("plan")
-        today_amt  = info.get("today_amount", 0.0)
+    lines=["📊 Статистика за 7 дней:\n"]
 
-        lines.append(f"{habit}{streak_str}")
-        lines.append(f"{bar} {done_days}/{total} дней ({pct}%)")
+    # Category summary
+    if cat_stats:
+        lines.append("── Категории (30 дней) ──")
+        for c in cat_stats:
+            actual=c["actual_pct"]; target=c["target_pct"]
+            bar=pbar(actual,6)
+            diff=actual-target
+            trend="↑" if diff>=0 else "↓"
+            lines.append(f"📁 {c['name']}")
+            lines.append(f"{bar} {actual}% (план {target}%) {trend}{abs(diff)}%")
+        lines.append("")
 
-        if plan and plan["target_amount"] > 0:
-            target  = plan["target_amount"]
-            unit    = plan["unit"]
-            amt_pct = min(int(today_amt / target * 100), 100)
-            amt_bar = progress_bar(amt_pct, length=6)
-            lines.append(f"Сегодня: {amt_bar} {fmt_amount(today_amt)}/{fmt_amount(target)} {unit} ({amt_pct}%)")
-
+    # Per habit
+    lines.append("── Задачи ──")
+    for h,info in data.items():
+        done=info["done"]; total=info["total"]
+        pct=int(done/total*100) if total>0 else 0
+        bar=pbar(pct); streak=info.get("streak",0)
+        ss=f"  🔥{streak}" if streak>=2 else ""
+        lines.append(f"{h}{ss}")
+        lines.append(f"{bar} {done}/{total} дней ({pct}%)")
+        plan=info.get("plan")
+        if plan and plan["target_amount"]>0:
+            t=plan["target_amount"]; u=plan["unit"]
+            ta=info.get("today_amount",0.0)
+            ap=min(int(ta/t*100),100)
+            lines.append(f"Сегодня: {pbar(ap,6)} {fa(ta)}/{fa(t)} {u} ({ap}%)")
         lines.append("")
 
     await update.message.reply_text("\n".join(lines), reply_markup=MAIN_KB)
 
-
 # ── ДАШБОРД ───────────────────────────────────────────────────────────────────
-
-async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update): return
-    uid = str(update.effective_user.id)
-
-    if not DASHBOARD_URL:
-        await update.message.reply_text("Добавь DASHBOARD_URL в переменные окружения.", reply_markup=MAIN_KB)
-        return
-
-    url = f"{DASHBOARD_URL}?uid={uid}"
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📈 Открыть дашборд", url=url)]])
-    await update.message.reply_text("Твой дашборд:", reply_markup=keyboard)
-
+async def report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await check(update): return
+    uid=str(update.effective_user.id)
+    if not DASHBOARD:
+        await update.message.reply_text("Добавь DASHBOARD_URL в переменные.", reply_markup=MAIN_KB); return
+    url=f"{DASHBOARD}?uid={uid}"
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Открыть дашборд",web_app=WebAppInfo(url=url))]])
+    await update.message.reply_text("Твой прогресс:", reply_markup=kb)
 
 # ── ОТМЕНА ────────────────────────────────────────────────────────────────────
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
+async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
     await update.message.reply_text("Отменено.", reply_markup=MAIN_KB)
     return ConversationHandler.END
 
+# ── TEXT HANDLER ──────────────────────────────────────────────────────────────
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    t=update.message.text
+    if t=="✅ Сделано":          await done_start(update,ctx)
+    elif t=="📋 Планы на сегодня": await plans_today(update,ctx)
+    elif t=="➕ Добавить":        await add_start(update,ctx)
+    elif t=="📝 Список":          await list_habits(update,ctx)
+    elif t=="🗑 Удалить":         await delete_start(update,ctx)
+    elif t=="📊 Статистика":      await stats(update,ctx)
+    elif t=="🗂 Категории":       await cats_menu(update,ctx)
 
-# ── Авто-пропуск ─────────────────────────────────────────────────────────────
+# ── AUTO SKIP ─────────────────────────────────────────────────────────────────
+async def auto_skip(ctx: ContextTypes.DEFAULT_TYPE):
+    users=sheets.get_all_users()
+    tz_=pytz.timezone(TZ); d=datetime.now(tz_).strftime("%Y-%m-%d"); t=datetime.now(tz_).strftime("%H:%M")
+    for uid,name in users:
+        for h in sheets.get_habits(uid):
+            if h in sheets.get_done_today(uid,d): continue
+            sheets.record_checkin(uid,h,"skip",d,t,0)
 
-async def auto_skip_job(context: ContextTypes.DEFAULT_TYPE):
-    """В 23:55 записывает пропуск для невыполненных привычек"""
-    users = sheets.get_all_users()
-    tz    = get_tz()
-    date  = datetime.now(tz).strftime("%Y-%m-%d")
-    t     = datetime.now(tz).strftime("%H:%M")
-
-    for user_id, name in users:
-        habits     = sheets.get_habits(user_id)
-        done_today = sheets.get_done_today(user_id, date)
-        amounts    = sheets.get_today_amounts(user_id, date)
-
-        for h in habits:
-            if h in done_today:
-                continue
-            # Check if partially done (has amount but not marked done)
-            if amounts.get(h, 0) > 0:
-                continue
-            # Mark as skipped
-            sheets.record_checkin(user_id, h, "skip", date, t, 0)
-            logger.info(f"Auto-skip: {user_id} / {h}")
-
-
-# ── Напоминание ───────────────────────────────────────────────────────────────
-
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
-    users = sheets.get_all_users()
-    tz    = get_tz()
-    date  = datetime.now(tz).strftime("%Y-%m-%d")
-    plans_all = {}
-
-    for user_id, name in users:
-        habits     = sheets.get_habits(user_id)
+async def send_reminder(ctx: ContextTypes.DEFAULT_TYPE):
+    users=sheets.get_all_users()
+    tz_=pytz.timezone(TZ); d=datetime.now(tz_).strftime("%Y-%m-%d")
+    for uid,name in users:
+        habits=sheets.get_habits(uid)
         if not habits: continue
-        done_today = sheets.get_done_today(user_id, date)
-        amounts    = sheets.get_today_amounts(user_id, date)
-        plans      = sheets.get_all_plans(user_id)
-        pending    = [h for h in habits if h not in done_today]
+        done_set=sheets.get_done_today(uid,d)
+        amts=sheets.get_today_amounts(uid,d)
+        plans=sheets.get_all_plans(uid)
+        pending=[h for h in habits if h not in done_set]
         if not pending: continue
-
-        lines = [f"⏰ {name}, не забудь!\n"]
+        lines=[f"⏰ {name}, не забудь!\n"]
         for h in pending:
-            plan = plans.get(h)
-            if plan and plan["target_amount"] > 0:
-                target = plan["target_amount"]
-                unit   = plan["unit"]
-                done_v = amounts.get(h, 0.0)
-                pct    = min(int(done_v / target * 100), 100)
-                lines.append(f"⬜ {h}: {fmt_amount(done_v)}/{fmt_amount(target)} {unit} ({pct}%)")
-            else:
-                lines.append(f"⬜ {h}")
-
+            p=plans.get(h)
+            if p and p["target_amount"]>0:
+                t=p["target_amount"]; u=p["unit"]; dv=amts.get(h,0.0)
+                lines.append(f"⬜ {h}: {fa(dv)}/{fa(t)} {u}")
+            else: lines.append(f"⬜ {h}")
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="\n".join(lines),
-                reply_markup=MAIN_KB
-            )
+            await ctx.bot.send_message(chat_id=uid,text="\n".join(lines),reply_markup=MAIN_KB)
         except Exception as e:
-            logger.warning(f"Reminder error {user_id}: {e}")
+            logger.warning(f"Reminder {uid}: {e}")
 
-
-# ── Main text handler ─────────────────────────────────────────────────────────
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles keyboard button presses outside of conversations"""
-    text = update.message.text
-
-    if text == "✅ Сделано":
-        return await done_start(update, context)
-    elif text == "📋 Планы на сегодня":
-        return await plans_today(update, context)
-    elif text == "➕ Добавить":
-        return await add_start(update, context)
-    elif text == "📝 Список":
-        return await list_habits(update, context)
-    elif text == "🗑 Удалить":
-        return await delete_start(update, context)
-    elif text == "📊 Статистика":
-        return await stats(update, context)
-    elif text == "📈 Дашборд":
-        return await report(update, context)
-
-
-# ── Launch ────────────────────────────────────────────────────────────────────
-
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app=Application.builder().token(TOKEN).build()
 
-    # Add habit conversation
-    add_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("add", add_start),
-            MessageHandler(filters.Regex("^➕ Добавить$"), add_start),
-        ],
+    add_conv=ConversationHandler(
+        entry_points=[CommandHandler("add",add_start),MessageHandler(filters.Regex("^➕ Добавить$"),add_start)],
         states={
-            ADD_NAME:         [MessageHandler(filters.TEXT & ~filters.COMMAND, add_get_name)],
-            ADD_PLAN_AMOUNT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, add_get_plan_amount)],
-            ADD_PLAN_UNIT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, add_get_plan_unit)],
+            ADD_NAME:     [MessageHandler(filters.TEXT&~filters.COMMAND,add_name)],
+            ADD_CAT:      [CallbackQueryHandler(add_cat_callback,pattern="^add_cat:")],
+            ADD_CAT_NEW:  [MessageHandler(filters.TEXT&~filters.COMMAND,add_cat_new)],
+            ADD_PLAN_AMT: [MessageHandler(filters.TEXT&~filters.COMMAND,add_plan_amt)],
+            ADD_PLAN_UNIT:[MessageHandler(filters.TEXT&~filters.COMMAND,add_plan_unit)],
         },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            MessageHandler(filters.Regex("^❌ Отмена$"), cancel),
-        ],
+        fallbacks=[CommandHandler("cancel",cancel),MessageHandler(filters.Regex("^❌ Отмена$"),cancel)],
         allow_reentry=True,
     )
 
-    # Done conversation
-    done_conv = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex("^✅ Сделано$"), done_start),
-            CommandHandler("done", done_start),
-        ],
+    done_conv=ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^✅ Сделано$"),done_start),CommandHandler("done",done_start)],
         states={
-            DONE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, done_get_amount)],
+            DONE_AMT:[
+                CallbackQueryHandler(done_pick,pattern="^dp:"),
+                MessageHandler(filters.TEXT&~filters.COMMAND,done_amt),
+            ],
         },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            MessageHandler(filters.Regex("^❌ Отмена$"), cancel),
-        ],
+        fallbacks=[CommandHandler("cancel",cancel),MessageHandler(filters.Regex("^❌ Отмена$"),cancel)],
         allow_reentry=True,
     )
 
-    app.add_handler(CommandHandler("start",  start))
-    app.add_handler(CommandHandler("help",   start))
+    app.add_handler(CommandHandler("start",start))
+    app.add_handler(CommandHandler("help",start))
     app.add_handler(add_conv)
     app.add_handler(done_conv)
-
-    # Inline callbacks
-    app.add_handler(CallbackQueryHandler(done_pick_callback,    pattern="^done_pick:"))
-    app.add_handler(CallbackQueryHandler(delete_pick_callback,  pattern="^del_pick:"))
-    app.add_handler(CallbackQueryHandler(delete_confirm_callback, pattern="^del_"))
-
-    # Other commands
-    app.add_handler(CommandHandler("list",    list_habits))
-    app.add_handler(CommandHandler("stats",   stats))
-    app.add_handler(CommandHandler("report",  report))
-    app.add_handler(CommandHandler("today",   plans_today))
-
-    # Text buttons
+    app.add_handler(CallbackQueryHandler(delete_cb,          pattern="^del:"))
+    app.add_handler(CallbackQueryHandler(delete_confirm_cb,  pattern="^(delok:|delno)"))
+    app.add_handler(CommandHandler("list",   list_habits))
+    app.add_handler(CommandHandler("stats",  stats))
+    app.add_handler(CommandHandler("today",  plans_today))
+    app.add_handler(CommandHandler("report", report))
+    app.add_handler(CommandHandler("addcat", add_cat_cmd))
+    app.add_handler(CommandHandler("delcat", del_cat_cmd))
+    app.add_handler(CommandHandler("settarget", set_target_cmd))
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(➕ Добавить|✅ Сделано)$"),
+        filters.TEXT&~filters.COMMAND&~filters.Regex("^(➕ Добавить|✅ Сделано)$"),
         handle_text
     ))
 
-    # Jobs
-    tz = get_tz()
-    jq = app.job_queue
-    jq.run_daily(send_reminder,  time=time(21, 0, tzinfo=tz))
-    jq.run_daily(auto_skip_job,  time=time(23, 55, tzinfo=tz))
+    tz_=pytz.timezone(TZ); jq=app.job_queue
+    jq.run_daily(send_reminder, time=time(21,0,tzinfo=tz_))
+    jq.run_daily(auto_skip,     time=time(23,55,tzinfo=tz_))
 
-    logger.info("Бот запущен!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("Бот запущен!"); app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
